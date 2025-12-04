@@ -1,50 +1,23 @@
-# -------------------------------------------------------------
-# PROJET GREEN AI - Est-ce rentable d'installer des panneaux ?
-# Version France / adresse postale / OSMnx 2.x / NASA POWER
-# -------------------------------------------------------------
-
 import osmnx as ox
 from osmnx import features, projection
 import requests
 from shapely.geometry import Point
 import math
 
-# -------------------------------------------------------------
-# 1) CONSTANTES GLOBALES
-# -------------------------------------------------------------
-
-# API NASA POWER (irradiance journalière)
+# API NASA POWER (pour obtenir l'irradiance journalière)
 NASA_API_DAILY = "https://power.larc.nasa.gov/api/temporal/daily/point"
 
-# Hypothèses économiques (à adapter dans ton rapport)
-COST_PER_KW = 1600          # €/kWc installé (ordre de grandeur France)
-ELECTRICITY_PRICE = 0.20    # €/kWh TTC (tarif réglementé ~0.20 € en 2025)
-SYSTEM_LIFETIME = 20        # années de durée de vie
-COVERAGE_RATIO = 0.6        # part de la surface de toit réellement couverte
+# Variables économiques (à mettre à jour régulièrement)
 PANEL_EFFICIENCY = 0.18     # rendement panneaux
 PERFORMANCE_RATIO = 0.75    # pertes système (câbles, onduleur…)
 
-
-# -------------------------------------------------------------
-# 2) GÉOCODAGE ADRESSE → (LAT, LON)
-# -------------------------------------------------------------
-
+# Utilise OSM pour retourner le point coordonnées d'une adresse (lat, lon)
 def geocode_address(address: str):
-    """
-    Utilise OSM pour convertir une adresse en coordonnées (lat, lon)
-    Retourne toujours un point → jamais d'erreur.
-    """
     try:
         lat, lon = ox.geocode(address + ", France")
         return lat, lon
     except Exception as e:
         raise RuntimeError(f"Impossible de géocoder l'adresse : {address}\n{e}")
-
-
-
-# -------------------------------------------------------------
-# 3) RÉCUPÉRER BÂTIMENTS OSM AUTOUR DU POINT
-# -------------------------------------------------------------
 
 def get_buildings_around(lat: float, lon: float, dist: float = 80):
     """
@@ -61,11 +34,6 @@ def get_buildings_around(lat: float, lon: float, dist: float = 80):
     # Garder uniquement Polygons / MultiPolygons
     b = b[b.geometry.type.isin(["Polygon", "MultiPolygon"])]
     return b
-
-
-# -------------------------------------------------------------
-# 4) SÉLECTIONNER LE TOIT LE PLUS PROCHE + PROJECTION
-# -------------------------------------------------------------
 
 def select_roof_and_project(buildings_gdf, lat: float, lon: float):
     """
@@ -90,11 +58,6 @@ def select_roof_and_project(buildings_gdf, lat: float, lon: float):
 
     return roof, buildings_proj
 
-
-# -------------------------------------------------------------
-# 5) FACTEUR D'OMBRE (DENSITÉ BÂTIE AUTOUR DU TOIT)
-# -------------------------------------------------------------
-
 def compute_shade_factor(buildings_proj, roof, buffer_m: float = 40.0):
     """
     Approxime l'ombre à partir de la densité de bâtiments dans un buffer autour du toit.
@@ -116,11 +79,6 @@ def compute_shade_factor(buildings_proj, roof, buffer_m: float = 40.0):
         return 0.8
     else:
         return 0.65   # environnement très dense
-
-
-# -------------------------------------------------------------
-# 6) IRRADIANCE NASA POWER (rayonnement + nuages)
-# -------------------------------------------------------------
 
 def get_solar_irradiance(lat: float, lon: float,
                          start_year: int = 2013,
@@ -157,67 +115,30 @@ def get_solar_irradiance(lat: float, lon: float,
         print("   Utilisation d'une valeur moyenne France ≈ 3.8 kWh/m²/jour")
         return 3.8
 
+def economic_analysis(area_m2: float):
+    # En moyenne besoin de 1000kWh par m2 par an
+    tot_kwh_needed = area_m2 * 1000
+    # En moyenne 1kWc produit 1200kWh par an
+    tot_kwc_needed = tot_kwh_needed / 1200
 
-# -------------------------------------------------------------
-# 7) PRODUCTION ANNUELLE ESTIMÉE
-# -------------------------------------------------------------
+    print(f"   → Production annuelle nécessaire estimée : {tot_kwh_needed:.0f} kWh/an")
+    print(f"   → Besoin : {tot_kwc_needed:.0f} kWc")
 
-def estimate_yearly_production(area_m2: float,
-                               irr_daily: float,
-                               shade_factor: float,
-                               orientation_factor: float = 0.9) -> float:
-    """
-    Estime la production annuelle (kWh/an) d'une installation PV
-    sur le toit considéré.
-    """
-    annual_irradiance = irr_daily * 365.0  # kWh/m²/an
+    # Coût d'installation du kWc (€/kWc adapté approximativement selon la quantité de kWc installés)
+    COST_PER_KWC = 1200 + (3/tot_kwc_needed) * 1800
+    investment = tot_kwc_needed * COST_PER_KWC
 
-    panel_area = area_m2 * COVERAGE_RATIO
-
-    effective_irradiance = annual_irradiance * shade_factor * orientation_factor
-
-    energy_kwh = (
-        panel_area *
-        effective_irradiance *
-        PANEL_EFFICIENCY *
-        PERFORMANCE_RATIO
-    )
-    return energy_kwh
-
-
-# -------------------------------------------------------------
-# 8) ANALYSE ÉCONOMIQUE
-# -------------------------------------------------------------
-
-def economic_analysis(annual_energy_kwh: float, area_m2: float):
-    """
-    Retourne (investissement estimé, temps de retour, label).
-    On utilise la surface pour estimer la puissance installée,
-    au lieu de relier directement le coût à l'énergie annuelle.
-    """
-
-    if annual_energy_kwh <= 0 or area_m2 <= 0:
-        return None, None, "Non viable"
-
-    # Surface réellement couverte par des panneaux
-    panel_area = area_m2 * COVERAGE_RATIO  # ex: 60% du toit
-
-    # Approximation : 1 kWc ≈ 5.5 m² de panneaux (rendement ~18%)
-    M2_PER_KW = 5.5
-    kwp_installed = panel_area / M2_PER_KW
-
-    # Coût d'installation
-    investment = kwp_installed * COST_PER_KW
+    print(f"   → Prix du kWc : {COST_PER_KWC:.0f} €")
 
     # Économies annuelles
-    annual_savings = annual_energy_kwh * ELECTRICITY_PRICE
+    annual_savings = tot_kwh_needed * 0.21  # Prix électricité (~0.21 €/kWh TTC en 2025)
     if annual_savings <= 0:
         payback = None
     else:
         payback = investment / annual_savings
 
     # Classification
-    if payback is None or payback > SYSTEM_LIFETIME:
+    if payback is None or payback > 25:  # durée de vie de 25 ans en moyenne
         label = "Peu intéressant financièrement"
     elif payback < 8:
         label = "Très intéressant"
@@ -231,21 +152,7 @@ def economic_analysis(annual_energy_kwh: float, area_m2: float):
     return investment, payback, label
 
 
-
-# -------------------------------------------------------------
-# 9) FONCTION COMPLÈTE : ADRESSE → DIAGNOSTIC
-# -------------------------------------------------------------
-
 def evaluate_address(address: str):
-    """
-    Pipeline complet :
-    - géocode l'adresse
-    - trouve le toit le plus proche
-    - calcule surface, ombre
-    - récupère irradiance NASA
-    - estime production & rentabilité
-    Retourne un dict de résultats.
-    """
     print(f"\n🔎 Évaluation pour l'adresse : {address}")
 
     # 1) Géocodage
@@ -256,10 +163,22 @@ def evaluate_address(address: str):
     buildings = get_buildings_around(lat, lon, dist=80)
     if buildings.empty:
         raise RuntimeError("Aucun bâtiment trouvé à proximité. Essaie avec une autre adresse.")
-
     roof, buildings_proj = select_roof_and_project(buildings, lat, lon)
-    area_m2 = roof.geometry.area.iloc[0]
-    print(f"   → Surface de toit estimée : {area_m2:.1f} m²")
+    area_m2 = roof.geometry.area.iloc[0]  # Toit le plus proche du point d'adresse (soit l'adresse visée)
+    '''
+    Dans un idéal proche de l'impossible il faudrait connaître la surface intérieure exacte,
+    alors pour faire une approximation on pourrait commencer par connaître le nombre d'étage(s)
+    (maison ~= 2 ou appartement ~= 1)
+    Idée : déterminer la localistaion en fonction du nombre de voisins, s'il est < 30 -> campagne
+    -> maison -> 2 étages, sinon ça veut dire que c'est dense -> ville -> appartement -> 1 étage
+    (théorie approuvée avec des tests, forcément des exceptions, mais elles impacteront moins négativement
+    l'estimation que l'approximation du nombre d'étages)
+    '''
+    # Seuil arbitraire : moins de 30 bâtiments alentour = campagne
+    if len(buildings_proj) < 30:
+        area_m2 *= 2
+    print(f"   → {len(buildings_proj)} bâtiments détectés dans les 80m")
+    print(f"   → Surface estimée : {area_m2:.1f} m²")
 
     # 3) Ombre
     shade = compute_shade_factor(buildings_proj, roof, buffer_m=40)
@@ -269,12 +188,8 @@ def evaluate_address(address: str):
     irr_daily = get_solar_irradiance(lat, lon)
     print(f"   → Irradiance moyenne (NASA) : {irr_daily:.2f} kWh/m²/jour")
 
-    # 5) Production annuelle
-    annual_energy = estimate_yearly_production(area_m2, irr_daily, shade)
-    print(f"   → Production annuelle estimée : {annual_energy:.0f} kWh/an")
-
-    # 6) Économie et rentabilité
-    investment, payback, label = economic_analysis(annual_energy, area_m2)
+    # 5) Économie et rentabilité
+    investment, payback, label = economic_analysis(area_m2)
 
     print("\n📊 Résumé économique :")
     if investment is not None:
@@ -289,16 +204,11 @@ def evaluate_address(address: str):
         "area_m2": area_m2,
         "shade_factor": shade,
         "irradiance_daily_kwh_m2": irr_daily,
-        "annual_energy_kwh": annual_energy,
+        # "annual_energy_kwh": annual_energy, (à mettre à jour avec nouveau calcul)
         "investment_eur": investment,
         "payback_years": payback,
         "decision": label,
     }
-
-
-# -------------------------------------------------------------
-# 10) MAIN : TEST INTERACTIF
-# -------------------------------------------------------------
 
 if __name__ == "__main__":
     print("=== Évaluation solaire (France) ===")
