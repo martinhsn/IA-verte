@@ -1,309 +1,184 @@
-# -------------------------------------------------------------
-# PROJET GREEN AI - Est-ce rentable d'installer des panneaux ?
-# Version France / adresse postale / OSMnx 2.x / NASA POWER
-# -------------------------------------------------------------
-
 import osmnx as ox
-from osmnx import features, projection
+from osmnx import features
+import geopandas as gpd
+from shapely.geometry import Point, mapping
+import folium
 import requests
-from shapely.geometry import Point
-import math
 
-# -------------------------------------------------------------
-# 1) CONSTANTES GLOBALES
-# -------------------------------------------------------------
+# Constantes ( inchangées)
+COVERAGE_RATIO = 0.5
+PANEL_EFFICIENCY = 0.18
+PERFORMANCE_RATIO = 0.75
+M2_PER_KW = 5
+CO2_PER_KWH = 0.08
+ELECTRICITY_PRICE = 0.20
+NASA_API = "https://power.larc.nasa.gov/api/temporal/daily/point"
 
-# API NASA POWER (irradiance journalière)
-NASA_API_DAILY = "https://power.larc.nasa.gov/api/temporal/daily/point"
-
-# Hypothèses économiques (à adapter dans ton rapport)
-COST_PER_KW = 1600          # €/kWc installé (ordre de grandeur France)
-ELECTRICITY_PRICE = 0.20    # €/kWh TTC (tarif réglementé ~0.20 € en 2025)
-SYSTEM_LIFETIME = 20        # années de durée de vie
-COVERAGE_RATIO = 0.6        # part de la surface de toit réellement couverte
-PANEL_EFFICIENCY = 0.18     # rendement panneaux
-PERFORMANCE_RATIO = 0.75    # pertes système (câbles, onduleur…)
-
-
-# -------------------------------------------------------------
-# 2) GÉOCODAGE ADRESSE → (LAT, LON)
-# -------------------------------------------------------------
 
 def geocode_address(address: str):
-    """
-    Utilise OSM pour convertir une adresse en coordonnées (lat, lon)
-    Retourne toujours un point → jamais d'erreur.
-    """
+    """Tente de géocoder l'adresse. Lève une erreur explicite si échec."""
     try:
-        lat, lon = ox.geocode(address + ", France")
+        # On ajoute France pour aider le géocodeur
+        search_query = address if "France" in address else address + ", France"
+        lat, lon = ox.geocode(search_query)
         return lat, lon
-    except Exception as e:
-        raise RuntimeError(f"Impossible de géocoder l'adresse : {address}\n{e}")
+    except Exception:
+        # Si OSMnx ne trouve pas, on lève une ValueError avec un message clair
+        raise ValueError(f"L'adresse '{address}' n'a pas pu être localisée précisément par OpenStreetMap.")
 
 
-
-# -------------------------------------------------------------
-# 3) RÉCUPÉRER BÂTIMENTS OSM AUTOUR DU POINT
-# -------------------------------------------------------------
-
-def get_buildings_around(lat: float, lon: float, dist: float = 80):
-    """
-    Récupère les bâtiments OSM dans un rayon `dist` (m) autour du point.
-    Retourne un GeoDataFrame (peut être vide).
-    """
-    center = (lat, lon)
-    # features_from_point(center_point, tags, dist)
-    b = features.features_from_point(
-        center,
-        {"building": True},
-        dist
-    )
-    # Garder uniquement Polygons / MultiPolygons
-    b = b[b.geometry.type.isin(["Polygon", "MultiPolygon"])]
-    return b
+def get_buildings(lat: float, lon: float, dist: int = 60):
+    """Récupère les bâtiments autour du point. Rayon réduit à 60m."""
+    try:
+        # On utilise tags={"building": True} qui est plus robuste
+        b = features.features_from_point((lat, lon), tags={"building": True}, dist=dist)
+        # On ne garde que les polygones (pas les points ou lignes)
+        buildings_poly = b[b.geometry.type.isin(["Polygon", "MultiPolygon"])]
+        
+        if buildings_poly.empty:
+             # Si la requête marche mais ne retourne aucun polygone
+             return gpd.GeoDataFrame()
+             
+        return buildings_poly
+    except Exception:
+        # Si la requête OSM échoue complètement (ex: timeout, zone vide)
+        return gpd.GeoDataFrame()
 
 
-# -------------------------------------------------------------
-# 4) SÉLECTIONNER LE TOIT LE PLUS PROCHE + PROJECTION
-# -------------------------------------------------------------
+def select_roof(buildings: gpd.GeoDataFrame, lat: float, lon: float):
+    """Sélectionne le bâtiment le plus proche du point central."""
+    
+    # VÉRIFICATION CRITIQUE : Si aucun bâtiment n'a été trouvé
+    if buildings.empty:
+        raise ValueError("Aucune donnée de bâtiment (polygone) trouvée dans OpenStreetMap à proximité immédiate de cette adresse.")
 
-def select_roof_and_project(buildings_gdf, lat: float, lon: float):
-    """
-    - projette tous les bâtiments en EPSG:2154 (Lambert 93, France)
-    - trouve le bâtiment le plus proche du point (lat, lon)
-    Retourne (roof_gdf_1row, buildings_proj).
-    """
-    if buildings_gdf.empty:
-        raise ValueError("Aucun bâtiment trouvé à proximité de l'adresse.")
+    # Projection métrique (Lambert 93 France) pour des calculs de distance précis
+    buildings_l93 = buildings.to_crs(2154)
+    
+    # Création du point central et projection en L93
+    pt_wgs84 = gpd.GeoSeries([Point(lon, lat)], crs=4326)
+    pt_l93 = pt_wgs84.to_crs(2154).iloc[0]
 
-    # Projection métrique France
-    buildings_proj = projection.project_gdf(buildings_gdf, to_crs="EPSG:2154")
+    # Trouver l'index du bâtiment le plus proche du point
+    distances = buildings_l93.geometry.distance(pt_l93)
+    idx_nearest = distances.idxmin()
+    
+    # Vérification de sécurité : si le bâtiment "le plus proche" est trop loin (> 50m)
+    # Cela évite de sélectionner la maison du voisin si la nôtre n'est pas dans OSM.
+    if distances[idx_nearest] > 50:
+         raise ValueError("Un bâtiment a été trouvé, mais il est trop éloigné du point d'adresse exact (>50m). Il est probable que votre bâtiment ne soit pas cartographié dans OSM.")
 
-    user_pt = Point(lon, lat)
-    user_pt_proj, _ = projection.project_geometry(
-        user_pt, crs="EPSG:4326", to_crs="EPSG:2154"
-    )
-
-    distances = buildings_proj.geometry.distance(user_pt_proj)
-    idx_min = distances.idxmin()
-    roof = buildings_proj.loc[[idx_min]]  # GeoDataFrame 1 ligne
-
-    return roof, buildings_proj
-
-
-# -------------------------------------------------------------
-# 5) FACTEUR D'OMBRE (DENSITÉ BÂTIE AUTOUR DU TOIT)
-# -------------------------------------------------------------
-
-def compute_shade_factor(buildings_proj, roof, buffer_m: float = 40.0):
-    """
-    Approxime l'ombre à partir de la densité de bâtiments dans un buffer autour du toit.
-    Renvoie un facteur entre ~0.6 (très ombragé) et 1.0 (peu d'obstacles).
-    """
-    roof_geom = roof.geometry.iloc[0]
-    buf = roof_geom.buffer(buffer_m)
-
-    neighbors = buildings_proj[buildings_proj.geometry.intersects(buf)]
-    built_area = neighbors.geometry.area.sum() - roof_geom.area
-    built_area = max(built_area, 0.0)
-    ratio = built_area / buf.area  # densité bâtie
-
-    if ratio < 0.1:
-        return 1.0    # campagne, peu de masques
-    elif ratio < 0.25:
-        return 0.9
-    elif ratio < 0.4:
-        return 0.8
-    else:
-        return 0.65   # environnement très dense
+    # On retourne le GeoDataFrame contenant uniquement le bâtiment sélectionné
+    return buildings_l93.loc[[idx_nearest]]
 
 
-# -------------------------------------------------------------
-# 6) IRRADIANCE NASA POWER (rayonnement + nuages)
-# -------------------------------------------------------------
-
-def get_solar_irradiance(lat: float, lon: float,
-                         start_year: int = 2013,
-                         end_year: int = 2023) -> float:
-    """
-    Récupère l'irradiance solaire ALLSKY_SFC_SW_DWN (kWh/m²/jour)
-    moyenne sur plusieurs années via l'API DAILY de NASA POWER.
-    """
-    start = f"{start_year}0101"
-    end = f"{end_year}1231"
-
+def get_irradiance(lat: float, lon: float) -> float:
+    """Récupère les données NASA avec un timeout pour ne pas bloquer l'app."""
     params = {
         "parameters": "ALLSKY_SFC_SW_DWN",
         "community": "RE",
         "longitude": lon,
         "latitude": lat,
-        "start": start,
-        "end": end,
-        "format": "JSON"
+        "start": "20130101",
+        "end": "20231231",
+        "format": "JSON",
     }
-
-    r = requests.get(NASA_API_DAILY, params=params, timeout=30)
-    data = r.json()
-
     try:
-        series = data["properties"]["parameter"]["ALLSKY_SFC_SW_DWN"]
-        values = list(series.values())
-        if not values:
-            raise ValueError("Liste vide de valeurs NASA.")
-        avg_daily = sum(values) / len(values)
-        return avg_daily  # kWh/m²/jour
+        # Ajout d'un timeout de 8 secondes pour ne pas faire attendre l'utilisateur
+        r = requests.get(NASA_API, params=params, timeout=8)
+        r.raise_for_status() # Lève une erreur si le code HTTP n'est pas 200 OK
+        
+        data = r.json()
+        vals = list(data["properties"]["parameter"]["ALLSKY_SFC_SW_DWN"].values())
+        # Nettoyage des valeurs manquantes (parfois -999 chez la NASA)
+        clean_vals = [v for v in vals if v > 0]
+        
+        if not clean_vals: raise Exception("Pas de données valides NASA")
+        
+        daily_avg = sum(clean_vals) / len(clean_vals)
+        
     except Exception as e:
-        print("⚠️ Problème avec l'API NASA POWER:", e)
-        print("   Utilisation d'une valeur moyenne France ≈ 3.8 kWh/m²/jour")
-        return 3.8
+        print(f"Warning NASA API: {e}. Utilisation de la valeur par défaut.")
+        daily_avg = 3.8 # Valeur moyenne par défaut en France si l'API échoue
+
+    return daily_avg * 365  # kWh/m²/an
 
 
-# -------------------------------------------------------------
-# 7) PRODUCTION ANNUELLE ESTIMÉE
-# -------------------------------------------------------------
+def create_folium_map(roof_l93: gpd.GeoDataFrame, lat: float, lon: float) -> folium.Map:
+    # Zoom initial fort pour bien voir la maison
+    m = folium.Map(location=[lat, lon], zoom_start=19, tiles=None)
 
-def estimate_yearly_production(area_m2: float,
-                               irr_daily: float,
-                               shade_factor: float,
-                               orientation_factor: float = 0.9) -> float:
-    """
-    Estime la production annuelle (kWh/an) d'une installation PV
-    sur le toit considéré.
-    """
-    annual_irradiance = irr_daily * 365.0  # kWh/m²/an
+    # Fond de carte satellite ESRI (souvent plus joli que Google)
+    folium.TileLayer(
+        tiles="https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}",
+        attr="Esri World Imagery",
+        name="Satellite",
+        max_zoom=21
+    ).add_to(m)
 
-    panel_area = area_m2 * COVERAGE_RATIO
+    # IMPORTANT : Reprojeter le toit de L93 (métrique) vers WGS84 (GPS) pour Folium
+    roof_wgs84 = roof_l93.to_crs(4326)
 
-    effective_irradiance = annual_irradiance * shade_factor * orientation_factor
+    folium.GeoJson(
+        mapping(roof_wgs84.geometry.iloc[0]),
+        style_function=lambda x: {
+            "color": "#FF0000",   # Rouge vif pour le contour
+            "weight": 3, 
+            "fillColor": "#FF0000", 
+            "fillOpacity": 0.3    # Remplissage léger
+        },
+        tooltip="Contour du bâtiment (Données OpenStreetMap)"
+    ).add_to(m)
+    
+    # Ajouter un marqueur sur le point d'adresse exact
+    folium.Marker(
+        [lat, lon],
+        tooltip="Point d'adresse exact géocodé",
+        icon=folium.Icon(color="blue", icon="info-sign")
+    ).add_to(m)
 
-    energy_kwh = (
-        panel_area *
-        effective_irradiance *
-        PANEL_EFFICIENCY *
-        PERFORMANCE_RATIO
-    )
-    return energy_kwh
-
-
-# -------------------------------------------------------------
-# 8) ANALYSE ÉCONOMIQUE
-# -------------------------------------------------------------
-
-def economic_analysis(annual_energy_kwh: float, area_m2: float):
-    """
-    Retourne (investissement estimé, temps de retour, label).
-    On utilise la surface pour estimer la puissance installée,
-    au lieu de relier directement le coût à l'énergie annuelle.
-    """
-
-    if annual_energy_kwh <= 0 or area_m2 <= 0:
-        return None, None, "Non viable"
-
-    # Surface réellement couverte par des panneaux
-    panel_area = area_m2 * COVERAGE_RATIO  # ex: 60% du toit
-
-    # Approximation : 1 kWc ≈ 5.5 m² de panneaux (rendement ~18%)
-    M2_PER_KW = 5.5
-    kwp_installed = panel_area / M2_PER_KW
-
-    # Coût d'installation
-    investment = kwp_installed * COST_PER_KW
-
-    # Économies annuelles
-    annual_savings = annual_energy_kwh * ELECTRICITY_PRICE
-    if annual_savings <= 0:
-        payback = None
-    else:
-        payback = investment / annual_savings
-
-    # Classification
-    if payback is None or payback > SYSTEM_LIFETIME:
-        label = "Peu intéressant financièrement"
-    elif payback < 8:
-        label = "Très intéressant"
-    elif payback <= 12:
-        label = "Intéressant"
-    elif payback <= 20:
-        label = "Acceptable"
-    else:
-        label = "Peu intéressant financièrement"
-
-    return investment, payback, label
+    return m
 
 
-
-# -------------------------------------------------------------
-# 9) FONCTION COMPLÈTE : ADRESSE → DIAGNOSTIC
-# -------------------------------------------------------------
-
-def evaluate_address(address: str):
-    """
-    Pipeline complet :
-    - géocode l'adresse
-    - trouve le toit le plus proche
-    - calcule surface, ombre
-    - récupère irradiance NASA
-    - estime production & rentabilité
-    Retourne un dict de résultats.
-    """
-    print(f"\n🔎 Évaluation pour l'adresse : {address}")
-
-    # 1) Géocodage
+def evaluate_address(address: str) -> dict:
+    """Fonction principale orchestrant le processus."""
+    
+    # 1. Géocodage (peut lever une erreur)
     lat, lon = geocode_address(address)
-    print(f"   → Coordonnées : lat={lat:.5f}, lon={lon:.5f}")
+    
+    # 2. Récupération des bâtiments (peut retourner vide)
+    buildings = get_buildings(lat, lon)
+    
+    # 3. Sélection du toit (peut lever une erreur si buildings est vide ou trop loin)
+    roof_l93 = select_roof(buildings, lat, lon)
 
-    # 2) Bâtiments
-    buildings = get_buildings_around(lat, lon, dist=80)
-    if buildings.empty:
-        raise RuntimeError("Aucun bâtiment trouvé à proximité. Essaie avec une autre adresse.")
+    # --- Calculs ---
+    # roof_l93 est en EPSG:2154, l'aire est donc en mètres carrés réels
+    area = roof_l93.geometry.area.iloc[0]
+    
+    # Si la surface est ridiculement petite (ex: < 10m²), c'est probablement une erreur de donnée OSM (ex: un abri de jardin)
+    if area < 15:
+         raise ValueError(f"Le bâtiment trouvé est trop petit ({area:.0f}m²) pour une installation solaire viable selon les données OSM.")
 
-    roof, buildings_proj = select_roof_and_project(buildings, lat, lon)
-    area_m2 = roof.geometry.area.iloc[0]
-    print(f"   → Surface de toit estimée : {area_m2:.1f} m²")
+    exploitable = area * COVERAGE_RATIO
+    kwp = exploitable / M2_PER_KW
 
-    # 3) Ombre
-    shade = compute_shade_factor(buildings_proj, roof, buffer_m=40)
-    print(f"   → Facteur d'ombre ≈ {shade:.2f}")
+    irr_annual = get_irradiance(lat, lon)
+    annual_energy = exploitable * irr_annual * PANEL_EFFICIENCY * PERFORMANCE_RATIO
 
-    # 4) Irradiance
-    irr_daily = get_solar_irradiance(lat, lon)
-    print(f"   → Irradiance moyenne (NASA) : {irr_daily:.2f} kWh/m²/jour")
+    co2_tonnes = (annual_energy * CO2_PER_KWH) / 1000
+    savings = annual_energy * ELECTRICITY_PRICE
 
-    # 5) Production annuelle
-    annual_energy = estimate_yearly_production(area_m2, irr_daily, shade)
-    print(f"   → Production annuelle estimée : {annual_energy:.0f} kWh/an")
-
-    # 6) Économie et rentabilité
-    investment, payback, label = economic_analysis(annual_energy, area_m2)
-
-    print("\n📊 Résumé économique :")
-    if investment is not None:
-        print(f"   - Investissement estimé : {investment:,.0f} €")
-    if payback is not None:
-        print(f"   - Temps de retour : {payback:.1f} ans")
-    print(f"   - Conclusion : {label}")
-
+    # On renvoie les données brutes. PAS de folium map ici pour éviter les soucis de SessionState.
     return {
         "lat": lat,
         "lon": lon,
-        "area_m2": area_m2,
-        "shade_factor": shade,
-        "irradiance_daily_kwh_m2": irr_daily,
+        "roof": roof_l93, # On garde le GeoDataFrame en L93
+        "area_m2": area,
+        "exploitable_m2": exploitable,
+        "kwp": kwp,
+        "irr_annual": irr_annual,
         "annual_energy_kwh": annual_energy,
-        "investment_eur": investment,
-        "payback_years": payback,
-        "decision": label,
+        "co2_tonnes": co2_tonnes,
+        "annual_savings_eur": savings,
     }
-
-
-# -------------------------------------------------------------
-# 10) MAIN : TEST INTERACTIF
-# -------------------------------------------------------------
-
-if __name__ == "__main__":
-    print("=== Évaluation solaire (France) ===")
-    addr = input("Entrez une adresse (ex: '10 Rue de Rivoli, Paris') : ")
-    try:
-        result = evaluate_address(addr)
-    except Exception as e:
-        print("\n❌ Erreur pendant l'évaluation :", e)
