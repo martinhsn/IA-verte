@@ -9,7 +9,7 @@ import requests
 PANEL_EFFICIENCY = 0.18
 PERFORMANCE_RATIO = 0.75
 M2_PER_KW = 5
-CO2_PER_KWH = 0.08
+CO2_PER_KWH = 0.0217
 ELECTRICITY_PRICE = 0.20
 NASA_API = "https://power.larc.nasa.gov/api/temporal/daily/point"
 
