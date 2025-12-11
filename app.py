@@ -119,7 +119,7 @@ elif st.session_state["results"]:
     kwp = results["kwp"] * panel_fraction
     irr = results["irr_annual"]
 
-    energy = kwp * irr
+    energy = kwp * irr * 0.75
 
     co2_tonnes = energy * CO2_PER_KWH / 1000
     co2_kg = co2_tonnes * 1000
@@ -275,19 +275,27 @@ for this location.
             """
 Once we know:
 
-- the **recommended system size** in kWp, and  
-- the **local annual irradiance** in kWh/m²/year,
+- the **recommended system size** in kWp,  
+- the **local annual irradiance** in kWh/m²/year, and
+- the **performance ratio (losses, wiring, inverter, etc.)**,
 
 we use a very simple proportional model: the yearly electricity production is
-approximated as the system size multiplied by the local irradiance.
+approximated as the system size multiplied by the local irradiance mulitplied and then by the performance ratio.
 All the detailed assumptions (roof layout, losses, etc.) are already embedded in
 the energy value shown above.
 """
         )
 
+#         st.latex(
+#             rf"""
+# E \simeq {kwp:.1f}\ \text{{kWp}} \times {irr:.0f}\ \text{{kWh/m}}^2/\text{{yr}}
+# \simeq {energy:,.0f}\ \text{{kWh/year}}
+# """
+#         )
+
         st.latex(
             rf"""
-E \simeq {kwp:.1f}\ \text{{kWp}} \times {irr:.0f}\ \text{{kWh/m}}^2/\text{{yr}}
+E \simeq {kwp:.1f}\ \text{{kWp}} \times {irr:.0f}\ \text{{kWh/m}}^2/\text{{yr}} \times 0.75
 \simeq {energy:,.0f}\ \text{{kWh/year}}
 """
         )

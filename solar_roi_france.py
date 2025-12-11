@@ -5,18 +5,13 @@ from shapely.geometry import Point, mapping
 import folium
 import requests
 
-
-PANEL_EFFICIENCY = 0.18
-PERFORMANCE_RATIO = 0.75
 M2_PER_KW = 5
-CO2_PER_KWH = 0.0217
-ELECTRICITY_PRICE = 0.1952
 NASA_API = "https://power.larc.nasa.gov/api/temporal/daily/point"
 
 
 def compute_dynamic_coverage(roof_l93):
     """
-    Compute a dynamic coverage ratio based on building compactness:
+    Compute a dynamic coverage ratio based on building compactness.
     compactness = area / perimeter^2
     """
     area = roof_l93.geometry.area.iloc[0]
@@ -33,6 +28,7 @@ def compute_dynamic_coverage(roof_l93):
 
 
 def geocode_address(address: str):
+    """Convert a French address to lat/lon using OpenStreetMap."""
     try:
         search_query = address if "France" in address else address + ", France"
         lat, lon = ox.geocode(search_query)
@@ -44,6 +40,7 @@ def geocode_address(address: str):
 
 
 def get_buildings(lat: float, lon: float, dist: int = 60):
+    """Retrieve OSM buildings near the coordinates."""
     try:
         b = features.features_from_point((lat, lon), tags={"building": True}, dist=dist)
         buildings_poly = b[b.geometry.type.isin(["Polygon", "MultiPolygon"])]
@@ -57,6 +54,7 @@ def get_buildings(lat: float, lon: float, dist: int = 60):
 
 
 def select_roof(buildings: gpd.GeoDataFrame, lat: float, lon: float):
+    """Select the nearest building footprint from OSM data."""
     if buildings.empty:
         raise ValueError(
             "No building detected in OSM in the immediate vicinity of this address."
@@ -79,6 +77,7 @@ def select_roof(buildings: gpd.GeoDataFrame, lat: float, lon: float):
 
 
 def get_irradiance(lat: float, lon: float) -> float:
+    """Fetch annual solar irradiance from NASA POWER API."""
     params = {
         "parameters": "ALLSKY_SFC_SW_DWN",
         "community": "RE",
@@ -101,15 +100,16 @@ def get_irradiance(lat: float, lon: float) -> float:
 
         daily_avg = sum(clean_vals) / len(clean_vals)
 
-    except Exception as e:
-        print(f"Warning NASA API: {e}. Using a default value.")
+    except Exception:
+        print("Warning NASA API: issue fetching data, using fallback 3.8 kWh/m²/day.")
         daily_avg = 3.8
 
-    return daily_avg * 365
+    return daily_avg * 365  # annual irradiance (kWh/m²/year)
 
 
 def create_folium_map(roof_l93: gpd.GeoDataFrame, lat: float, lon: float) -> folium.Map:
-    def style_roof(feature):
+    """Create a Folium map centered on the location with roof outline."""
+    def style_roof(_):
         return {
             "color": "#FF0000",
             "weight": 3,
@@ -144,14 +144,12 @@ def create_folium_map(roof_l93: gpd.GeoDataFrame, lat: float, lon: float) -> fol
 
 
 def evaluate_address(address: str) -> dict:
+    """Main function: geocode → find roof → compute basic metrics."""
     lat, lon = geocode_address(address)
-
     buildings = get_buildings(lat, lon)
-
     roof_l93 = select_roof(buildings, lat, lon)
 
     area = roof_l93.geometry.area.iloc[0]
-
     if area < 15:
         raise ValueError(f"The building found is too small ({area:.0f} m²).")
 
@@ -159,13 +157,7 @@ def evaluate_address(address: str) -> dict:
     exploitable = area * coverage_ratio
 
     kwp = exploitable / M2_PER_KW
-
     irr_annual = get_irradiance(lat, lon)
-
-    annual_energy = exploitable * irr_annual * PANEL_EFFICIENCY * PERFORMANCE_RATIO
-
-    co2_tonnes = (annual_energy * CO2_PER_KWH) / 1000
-    savings = annual_energy * ELECTRICITY_PRICE
 
     return {
         "lat": lat,
@@ -176,7 +168,4 @@ def evaluate_address(address: str) -> dict:
         "exploitable_m2": exploitable,
         "kwp": kwp,
         "irr_annual": irr_annual,
-        "annual_energy_kwh": annual_energy,
-        "co2_tonnes": co2_tonnes,
-        "annual_savings_eur": savings,
     }
