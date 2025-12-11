@@ -1,12 +1,35 @@
 import streamlit as st
 from streamlit_folium import st_folium
 from solar_roi_france import evaluate_address, create_folium_map
-
+import pandas as pd  
+import numpy as np   
+import datetime
+from sklearn.linear_model import LinearRegression
 
 CO2_PER_KWH = 0.0217
 ELECTRICITY_PRICE = 0.1952
 
+@st.cache_resource
+def get_electricity_price_model():
 
+    try:
+        df = pd.read_csv("Option_Base.csv", sep=";", decimal=",")
+        
+        df['DATE_DEBUT'] = pd.to_datetime(df['DATE_DEBUT'], format="%d/%m/%Y")
+        df['YEAR'] = df['DATE_DEBUT'].dt.year
+        
+        df_yearly = df.groupby('YEAR')['PART_VARIABLE_TTC'].mean().reset_index()
+        
+        X = df_yearly[['YEAR']]
+        y = df_yearly['PART_VARIABLE_TTC']
+        
+        model = LinearRegression()
+        model.fit(X, y)
+        
+        return model
+    except Exception as e:
+        st.error(f"Error loading prediction model: {e}")
+        return None
 st.set_page_config(page_title="Solar AI Project", layout="centered")
 st.markdown(
     """
@@ -349,8 +372,7 @@ including equipment, installation, administrative fees, and maintenance.
             st.markdown(
                 """
 The simple payback time tells you how many years of electricity savings are
-needed to cover the initial installation cost (ignoring future price changes,
-maintenance, subsidies, or financing).
+needed to cover the initial installation cost.
 """
             )
             st.latex(
@@ -360,15 +382,30 @@ T_{{\text{{payback}}}} \simeq
 \simeq {payback_years:.1f}\ \text{{years}}
 """
             )
+            
+            current_year = datetime.datetime.now().year
+            future_year_float = current_year + payback_years
+            future_year_int = int(future_year_float)
+            
             st.markdown(
-                f"After roughly **year {int(payback_years) + 1}**, the system is paid back and the following years correspond to net savings."
-            )
-        else:
-            st.markdown(
-                "With the current assumptions, yearly savings are not positive, so a payback time cannot be computed."
+                f"After roughly **year {int(future_year_float)}**, the system is paid back."
             )
 
-        st.info(
-            "Note: This model does not yet account for roof orientation, tilt, or shading. "
-            "A real assessment would refine these estimates."
-        )
+            model = get_electricity_price_model()
+
+            if model is not None:
+                predicted_price = model.predict([[future_year_float]])[0]
+
+                st.markdown("---")
+                st.markdown(f"#### Electricity Price Prediction in {future_year_int}")
+                st.info(
+                    f"According to our linear regression model based on historical tariffs (Base Option), "
+                    f"the estimated electricity price in your payback year ({future_year_int}) will be approximately: "
+                    f"**{predicted_price:.4f} €/kWh**."
+                )
+                st.caption("Note: This is a simple statistical estimate that does not account for geopolitical crises or major regulatory changes.")
+
+            else:
+                st.markdown(
+                    "With the current assumptions, yearly savings are not positive, so a payback time cannot be computed."
+                )
