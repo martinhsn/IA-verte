@@ -286,13 +286,6 @@ the energy value shown above.
 """
         )
 
-#         st.latex(
-#             rf"""
-# E \simeq {kwp:.1f}\ \text{{kWp}} \times {irr:.0f}\ \text{{kWh/m}}^2/\text{{yr}}
-# \simeq {energy:,.0f}\ \text{{kWh/year}}
-# """
-#         )
-
         st.latex(
             rf"""
 E \simeq {kwp:.1f}\ \text{{kWp}} \times {irr:.0f}\ \text{{kWh/m}}^2/\text{{yr}} \times 0.75
